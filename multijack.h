@@ -17,7 +17,7 @@ static const int MENU_HEAD          = 0; //Position of head position in menu
 static const int MENU_SIZE          = 20; //Position of file size in menu
 static const int MENU_TC            = 32; //Position of transport control in menu
 static const int MENU_FORMAT        = 39; //Position of data format in menu
-static const int MENU_PROJECT       = 57; //Position of project name in menu
+static const int MENU_PROJECT       = 49; //Position of project name in menu
 //Transport control states
 static const int TC_STOPPED     = 0;
 static const int TC_ROLLING     = 1;
@@ -169,6 +169,16 @@ void DisconnectPlayback(unsigned int nTrack, unsigned int nPorts = PORT_BOTH);
 */
 bool Record(jack_nframes_t nFrames);
 
+/** @brief  Connect to Jack server
+*   @return <i>bool</i> True on success
+*/
+bool ConnectJack();
+
+/** @brief  Quits application, cleaning up before closing
+*   @param  nError Error code to return to shell. Default = 0 (no error).
+*/
+void Quit(int nError = 0);
+
 //Global variables
 jack_nframes_t g_nCaptureLatency; //Numbers of frames of capture latency
 jack_nframes_t g_nPlaybackLatency; //Numbers of frames of playback latency
@@ -176,6 +186,7 @@ jack_nframes_t g_nSamplerate; //Quantity of frames per second
 jack_nframes_t g_nRecordOffset; //Quantity of frames offset between record head and play head
 //unsigned int g_nChannels; //Quantity of tracks
 unsigned int g_nSelectedTrack; //Currently selected track
+unsigned int g_nJackConnectAttempt; //Quantity of connection attempts
 int g_nRecA; //Number of track primed to record A-leg input
 int g_nRecB; //Number of track primed to record B-leg input
 int g_nTransport; //Transport status
@@ -184,7 +195,7 @@ static int g_nPeriodSize; //Period size - size of all samples in each period (sa
 long g_lLastFrame; //Last frame
 long g_lHeadPos; //Quantity of frames from start of current head position
 bool g_bRecordEnabled; //True if recording
-bool g_bLoop; //True to continue main loop
+bool g_bRunning; //True if application running (main loop)
 int g_fdWave; //File descriptor of wave file
 std::string g_sPath; //Project path
 std::string g_sProject; //Project name

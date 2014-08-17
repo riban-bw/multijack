@@ -5,6 +5,8 @@
 *   Acts like linear multitrack tape recorder
 */
 
+///@todo Transport navigation causes short play of audio, e.g. goto home
+
 #include "multijack.h"
 #include "track.h"
 #include <stdio.h>
@@ -23,6 +25,7 @@ using namespace std;
 
 int OnJackProcess(jack_nframes_t nFrames, void* pArgs)
 {
+    //!@todo Optimse process code
     if(TC_STOPPED == g_nTransport)
         return 0; //Not rolling so don't process any audio
     else if(TC_STOPPING == g_nTransport)
@@ -53,7 +56,6 @@ int OnJackProcess(jack_nframes_t nFrames, void* pArgs)
             {
                 jack_default_audio_sample_t fSample = g_pReadBuffer[nFrame * g_vTracks.size() + nChan];
                 jack_default_audio_sample_t* pOut = (jack_default_audio_sample_t*)(jack_port_get_buffer(g_vJackSourcePorts[nChan], nReadFrames));
-                //!@todo Add stereo / 2 channel output
                 if(TC_STOP == g_nTransport)
                     pOut[nFrame] = (nFrames - nFrame) * g_vTracks[nChan]->Mix(fSample) / nFrames; //Fade out last frame to reduce click on stop
                 else if(TC_START == g_nTransport)
@@ -135,7 +137,6 @@ void OnJackTimebase(jack_transport_state_t nState, jack_nframes_t nFrames, jack_
         default:
             break;
     }
-
 }
 
 void OnJackLatency(jack_latency_callback_mode_t latencyMode, void* pArgs)
@@ -152,7 +153,7 @@ void OnJackLatency(jack_latency_callback_mode_t latencyMode, void* pArgs)
 void OnJackShutdown(void* pArgs)
 {
     //!@todo Flag Jack closed
-	exit (1);
+	g_pJackClient = NULL;
 }
 
 int OnJackBufferChange(jack_nframes_t nFrames, void *pArgs)
@@ -165,125 +166,20 @@ int OnJackBufferChange(jack_nframes_t nFrames, void *pArgs)
 int main(int argc, char *argv[])
 {
     g_lDebug = 0;
-	const char** as_ports; //array of pointers to c-strings used to hold list of port names
-	const char *pCharServerName = NULL; //Pointer to name of Jack server
-	jack_options_t options = JackNullOption; //Holds Jack options
-	jack_status_t status; //Holds Jack status
 	g_nCaptureLatency = 0;
 	g_nPlaybackLatency = 0;
     g_nTransport = TC_STOPPED;
     g_bRecordEnabled = false;
     g_nSelectedTrack = 0;
-    g_nSamplerate = DEFAULT_SAMPLERATE;
     g_nRecA = -1; //Deselect A-channel recording
     g_nRecB = -1; //Deselect B-channel recording
-    g_bLoop = true;
+    g_bRunning = true; //Main program loop flag - loop if true
     g_fdWave = -1;
     g_pSilence = NULL;
     g_pReadBuffer = NULL;
     g_sPath = "/media/multitrack/"; //!@todo replace this absolute path
-
-	//open a client connection to the JACK server
-	g_pJackClient = jack_client_open("multijack", options, &status, pCharServerName);
-	if(!g_pJackClient)
-    {
-        //!@todo Handle inability to connect to Jack server, e.g. wait and try again
-		cerr << "jack_client_open() failed, status = " << status << endl;
-		if(status & JackServerFailed)
-			cerr << "Unable to connect to JACK server" << endl;
-		exit(1);
-	}
-	g_nSamplerate = jack_get_sample_rate(g_pJackClient); //!@todo Is it useful to get samplerate here?
-
-    //Assign Jack callback handler functions
-    //Set callback to handle Jack process (something needs to be done)
-	jack_set_process_callback(g_pJackClient, OnJackProcess, 0);
-	//Set callback to handle Jack slow sync (transport) events
-//	jack_set_sync_callback(g_pJackClient, OnJackSync, 0);
-
-    jack_set_timebase_callback(g_pJackClient, 1, OnJackTimebase, 0);
-
-    //Set callback to handle Jack shutdown
-    jack_on_shutdown(g_pJackClient, OnJackShutdown, 0);
-    //Set callback to handle latency changes
-    jack_set_latency_callback(g_pJackClient, OnJackLatency, 0);
-    //Set callback to handle Jack buffer size change
-    jack_set_buffer_size_callback(g_pJackClient, OnJackBufferChange, 0);
-
-    //Create buffer to hold samples read from file
-    g_pReadBuffer = new jack_default_audio_sample_t[jack_get_buffer_size(g_pJackClient) * g_vTracks.size()];
-
-	//Create ports
-	g_pPortInputA = jack_port_register(g_pJackClient, "Input A", JACK_DEFAULT_AUDIO_TYPE, JackPortIsInput, 0);
-	g_pPortInputB = jack_port_register(g_pJackClient, "Input B", JACK_DEFAULT_AUDIO_TYPE, JackPortIsInput, 0);
-
-	if(!g_pPortInputA || !g_pPortInputB)
-    {
-        fprintf(stderr, "Error - cannot register Jack ports\n");
-		exit(1);
-	}
-
-	if(jack_activate(g_pJackClient))
-    {
-		fprintf(stderr, "Error - cannot activate Jack client\n");
-		exit(1);
-	}
-
-    //Connect capture ports
-	as_ports = jack_get_ports(g_pJackClient, NULL, JACK_DEFAULT_AUDIO_TYPE, JackPortIsPhysical | JackPortIsOutput);
-	if(as_ports == NULL)
-    {
-		fprintf(stderr, "Error - no physical capture ports available\n");
-		exit(1);
-	}
-	int nPort = 0;
-	while(as_ports[++nPort])
-        ; //!@todo There must be a better way to deduce quantity of ports
-    if(nPort < 2)
-    {
-        fprintf(stderr, "Error - insufficient capture ports - require 2, found %d", nPort);
-        exit(1);
-    }
- 	printf("Number of physical capture ports is %d\n", nPort);
-
-    if(jack_connect(g_pJackClient, as_ports[0], jack_port_name(g_pPortInputA)))
-    {
-        fprintf (stderr, "Cannot connect input port A\n");
-    }
-    if(jack_connect(g_pJackClient, as_ports[1], jack_port_name(g_pPortInputB)))
-    {
-        fprintf (stderr, "Cannot connect input port B\n");
-    }
-	free(as_ports);
-
-	as_ports = jack_get_ports(g_pJackClient, NULL, JACK_DEFAULT_AUDIO_TYPE, JackPortIsPhysical | JackPortIsInput);
-	if(as_ports == NULL)
-    {
-		fprintf(stderr, "No physical playback as_ports\n");
-		exit(1);
-	}
-	nPort = 0;
-	while(as_ports[++nPort])
-        ;
-    if(nPort < 2)
-    {
-        fprintf(stderr, "Error - insufficient playback ports - require 2, found %d", nPort);
-        exit(1);
-    }
- 	printf("Number of physical playback ports is %d\n", nPort);
-
- 	g_pPortPlaybackA = jack_port_by_name(g_pJackClient, as_ports[0]); //!@todo Do better checking of physical ports
- 	g_pPortPlaybackB = jack_port_by_name(g_pJackClient, as_ports[1]);
-
-//    if(jack_connect(g_pJackClient, jack_port_name(g_pPortOutputA), as_ports[0]))
-//    {
-//        fprintf(stderr, "Cannot connect output port A\n");
-//    }
-//    if(jack_connect(g_pJackClient, jack_port_name(g_pPortOutputB), as_ports[1]))
-//    {
-//        fprintf(stderr, "Cannot connect output port B\n");
-//    }
-	free(as_ports);
+    g_pJackClient = NULL;
+    g_nJackConnectAttempt = 0;
 
     //Initialise ncurses
     initscr();
@@ -302,9 +198,6 @@ int main(int argc, char *argv[])
     g_pWindowRouting = newwin(MAX_TRACKS, 40, 1, 0);
     refresh();
 
-    LoadProject("default");
-    ShowMenu();
-
     //Set stdin to non-blocking
     termios flags;
     if(tcgetattr(fileno(stdin), &flags) < 0)
@@ -317,16 +210,29 @@ int main(int argc, char *argv[])
     flags.c_cc[VTIME] = 0; // block if waiting for char
     if(tcsetattr(fileno(stdin), TCSANOW, &flags) < 0)
     {
-        /* handle error */
         cerr << "Failed to set terminal attributes" << endl;
+        Quit(1);
     }
 
 	/* keep running until stopped by the user */
-	while(g_bLoop)
+	while(g_bRunning)
     {
         HandleControl();
+        while(!g_pJackClient)
+        {
+            ConnectJack(); //!@todo Not connecting to playback on startup
+            sleep(1);
+            HandleControl();
+            if(!g_bRunning)
+                Quit();
+        }
         usleep(1000);
     }
+    Quit();
+}
+
+void Quit(int nError)
+{
     if(TC_ROLLING == g_nTransport)
     {
         //Currently playing so need to stop
@@ -337,15 +243,17 @@ int main(int argc, char *argv[])
         if(g_nRecB > -1)
             g_vTracks[g_nRecB]->bRecording = false;
         UpdateLength();
-        usleep(100000); //Wait for soft stop
+        //!@todo Could use while(TC_STOPPED != g_nTransport) but may never end if Jack server is not running
+        usleep(100000); //Wait for soft stop to complete (fade out audio over one period)
     }
     SaveProject();
     CloseFile();
     delete[] g_pSilence;
     delete[] g_pReadBuffer;
     endwin(); //End ncurses
-	jack_client_close(g_pJackClient);
-	exit(0);
+    if(g_pJackClient)
+        jack_client_close(g_pJackClient);
+	exit(nError);
 }
 
 void ShowMenu()
@@ -375,14 +283,13 @@ void ShowMenu()
         if(g_vTracks[i]->bMuteA && g_vTracks[i]->bMuteB)
         {
             wattron(g_pWindowRouting, COLOR_PAIR(RED_BLACK));
-            wprintw(g_pWindowRouting, " MUTE ");
+            wprintw(g_pWindowRouting, " MUTE   ");
             wattroff(g_pWindowRouting, COLOR_PAIR(RED_BLACK));
         }
         else
         {
-            char aChar[4] = "Off";
-            if(g_vTracks[i]->nMonMix > 0)
-                sprintf(aChar, "% 3d", g_vTracks[i]->nMonMix); //!@todo '100' is offset by one space
+            char aChar[8];
+            sprintf(aChar, "% 4d %s%s", g_vTracks[i]->nMonMix, g_vTracks[i]->bMuteA?" ":"L", g_vTracks[i]->bMuteB?" ":"R");
             wprintw(g_pWindowRouting, " %s ", aChar);
         }
     }
@@ -408,7 +315,7 @@ void ShowMenu()
                 attron(COLOR_PAIR(WHITE_RED));
             else
                 attron(COLOR_PAIR(BLACK_GREEN));
-            mvprintw(0, MENU_TC, " PLAY ");
+            mvprintw(0, MENU_TC, " ROLL ");
             if(g_bRecordEnabled)
                 attroff(COLOR_PAIR(WHITE_RED));
             else
@@ -436,7 +343,7 @@ void HandleControl()
         case 'q':
             //Quit
             //!@todo Confirm quit
-            g_bLoop = false;
+            g_bRunning = false;
             break;
         case 'o':
             //Open project
@@ -652,10 +559,10 @@ bool OpenFile()
         if((read(g_fdWave, pBuffer, 12) < 12) || (0 != strncmp(pBuffer, "RIFF", 4)) || (0 != strncmp(pBuffer + 8, "WAVE", 4)))
         {
             //Invalid file so create a WAVE file with 4 seconds of silence
-            g_nSamplerate = jack_get_sample_rate(g_pJackClient);
+            g_nSamplerate = jack_get_sample_rate(g_pJackClient); //!@todo Handle different samplerate to project (warn and resolve?)
             if(0 == g_nSamplerate)
                 g_nSamplerate = DEFAULT_SAMPLERATE;
-            size_t nWaveSize = g_nSamplerate * g_vTracks.size() * sizeof(jack_default_audio_sample_t) * 4;
+            size_t nWaveSize = g_nSamplerate * MAX_TRACKS * sizeof(jack_default_audio_sample_t) * 4;
             WriteHeader(nWaveSize, MAX_TRACKS);
             unsigned char pSilentBuffer[nWaveSize];
             memset(pSilentBuffer, 0, nWaveSize);
@@ -695,8 +602,11 @@ bool OpenFile()
                 if(0 == g_nSamplerate)
                     g_nSamplerate = DEFAULT_SAMPLERATE;
                 g_nFrameSize = g_vTracks.size() * sizeof(jack_default_audio_sample_t);
-                attron(COLOR_PAIR(WHITE_MAGENTA));
-                mvprintw(0, MENU_FORMAT, " % 2d-bit % 6dHz ", pWaveHeader->nBitsPerSample, pWaveHeader->nSampleRate);
+                if(jack_get_sample_rate(g_pJackClient) != g_nSamplerate)
+                    attron(COLOR_PAIR(WHITE_RED));
+                else
+                    attron(COLOR_PAIR(WHITE_MAGENTA));
+                mvprintw(0, MENU_FORMAT, " % 6dHz ", pWaveHeader->nSampleRate);
                 attroff(COLOR_PAIR(WHITE_MAGENTA));
                 lseek(g_fdWave, nSize - sizeof(pWaveBuffer), SEEK_CUR); //ignore other parameters
             }
@@ -924,9 +834,9 @@ bool LoadProject(string sName)
     return true;
 }
 
-bool SaveProject(string sName)
+bool SaveProject(std::string sName)
 {
-    string sConfig = g_sPath;
+    std::string sConfig = g_sPath;
     if(sName == "")
     {
         sConfig.append(g_sProject);
@@ -950,17 +860,19 @@ bool SaveProject(string sName)
     if(pFile)
     {
         char pBuffer[32];
+        fputs("# This configuration file is completely overwritten each time the project is saved\n", pFile);
+        fputs("# Do not manually edit this file whilst multijack is using this project.\n\n", pFile);
         for(unsigned int i = 0; i < g_vTracks.size(); ++i)
         {
             memset(pBuffer, 0, sizeof(pBuffer));
             sprintf(pBuffer, "%02dV=%d\n", i, g_vTracks[i]->nMonMix);
-            fputs(pBuffer , pFile);
+            fputs(pBuffer, pFile);
             memset(pBuffer, 0, sizeof(pBuffer));
             sprintf(pBuffer, "%02dL=%s",i, g_vTracks[i]->bMuteA?"0\n":"1\n");
-            fputs(pBuffer , pFile);
+            fputs(pBuffer, pFile);
             memset(pBuffer, 0, sizeof(pBuffer));
             sprintf(pBuffer, "%02dR=%s",i, g_vTracks[i]->bMuteB?"0\n":"1\n");
-            fputs(pBuffer , pFile);
+            fputs(pBuffer, pFile);
         }
         memset(pBuffer, 0, sizeof(pBuffer));
         sprintf(pBuffer, "Pos=%ld\n", g_lHeadPos);
@@ -1047,4 +959,110 @@ bool Record(jack_nframes_t nFrames)
     }
     pwrite(g_fdWave, g_pReadBuffer, nRead, offRewrite);
     return true;
+}
+
+bool ConnectJack()
+{
+	//open a client connection to the JACK server
+	jack_options_t options = JackNoStartServer;
+	jack_status_t nStatus;
+	const char *pCharServerName = NULL; //Pointer to name of Jack server
+    const char** as_ports; //array of pointers to c-strings used to hold list of port names
+    if(!g_pJackClient)
+        g_pJackClient = jack_client_open("multijack", options, &nStatus, pCharServerName);
+	if(!g_pJackClient)
+    {
+		if(nStatus & JackServerFailed)
+        attron(COLOR_PAIR(WHITE_RED));
+        mvprintw(20, 0, " Disconnected from JACK - attempting to recover... % 3u ", ++g_nJackConnectAttempt);
+        attroff(COLOR_PAIR(WHITE_RED));
+        wrefresh(g_pWindowRouting);
+		return false;
+	}
+	g_nSamplerate = jack_get_sample_rate(g_pJackClient); //!@todo Is it useful to get samplerate here? Should we (attempt to) set Jack samplerate after opening file?
+
+    //Assign Jack callback handler functions
+    //Set callback to handle Jack process (something needs to be done)
+	jack_set_process_callback(g_pJackClient, OnJackProcess, 0);
+	//Set callback to handle Jack slow sync (transport) events
+	jack_set_sync_callback(g_pJackClient, OnJackSync, 0); //!@todo Does not handled STOP from Jack transport
+//    jack_set_timebase_callback(g_pJackClient, 1, OnJackTimebase, 0); //!@todo This does not work
+    //Set callback to handle Jack shutdown
+    jack_on_shutdown(g_pJackClient, OnJackShutdown, 0);
+    //Set callback to handle latency changes
+    jack_set_latency_callback(g_pJackClient, OnJackLatency, 0);
+    //Set callback to handle Jack buffer size change
+    jack_set_buffer_size_callback(g_pJackClient, OnJackBufferChange, 0);
+
+    //Create buffer to hold samples read from file
+    g_pReadBuffer = new jack_default_audio_sample_t[jack_get_buffer_size(g_pJackClient) * g_vTracks.size()];
+
+	//Create capture ports
+	g_pPortInputA = jack_port_register(g_pJackClient, "Input A", JACK_DEFAULT_AUDIO_TYPE, JackPortIsInput, 0);
+	g_pPortInputB = jack_port_register(g_pJackClient, "Input B", JACK_DEFAULT_AUDIO_TYPE, JackPortIsInput, 0);
+	if(!g_pPortInputA || !g_pPortInputB)
+    {
+        cerr << "Error - cannot register Jack ports" << endl;
+		return false;
+	}
+	//Find playback ports (expect 2)
+	as_ports = jack_get_ports(g_pJackClient, NULL, JACK_DEFAULT_AUDIO_TYPE, JackPortIsPhysical | JackPortIsInput);
+	if(as_ports == NULL)
+    {
+		cerr << "No physical playback as_ports" << endl;
+		return false;
+	}
+	int nPort = 0;
+	while(as_ports[++nPort])
+        ;
+    if(nPort < 2)
+    {
+        fprintf(stderr, "Error - insufficient playback ports - require 2, found %d", nPort);
+        free(as_ports);
+        return false;
+    }
+	//!@todo Handle different playback port configuration, e.g. when monitor ports are not first two
+ 	g_pPortPlaybackA = jack_port_by_name(g_pJackClient, as_ports[0]);
+ 	g_pPortPlaybackB = jack_port_by_name(g_pJackClient, as_ports[1]);
+	free(as_ports);
+
+	if(jack_activate(g_pJackClient))
+    {
+		fprintf(stderr, "Error - cannot activate Jack client\n");
+		return false;
+	}
+
+    LoadProject("default");
+    ShowMenu();
+
+    //Connect capture ports
+	as_ports = jack_get_ports(g_pJackClient, NULL, JACK_DEFAULT_AUDIO_TYPE, JackPortIsPhysical | JackPortIsOutput);
+	if(as_ports == NULL)
+    {
+		fprintf(stderr, "Error - no physical capture ports available\n");
+		return false;
+	}
+	nPort = 0;
+	while(as_ports[++nPort])
+        ; //!@todo There must be a better way to deduce quantity of ports
+    if(nPort < 2)
+    {
+        fprintf(stderr, "Error - insufficient capture ports - require 2, found %d", nPort);
+        free(as_ports);
+        return false;
+    }
+    if(jack_connect(g_pJackClient, as_ports[0], jack_port_name(g_pPortInputA)))
+    {
+        fprintf (stderr, "Cannot connect input port A\n");
+    }
+    if(jack_connect(g_pJackClient, as_ports[1], jack_port_name(g_pPortInputB)))
+    {
+        fprintf (stderr, "Cannot connect input port B\n");
+    }
+	free(as_ports);
+
+    move(20, 0);
+    clrtoeol();
+    g_nJackConnectAttempt = 0;
+	return true;
 }
